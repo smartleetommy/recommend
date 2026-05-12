@@ -15,6 +15,13 @@ const filterOptions = [
   { value: "today", label: "今天到期" }
 ];
 
+const notificationStatusLabels = {
+  granted: "已允许",
+  denied: "已拒绝",
+  default: "未设置",
+  unsupported: "当前浏览器不支持"
+};
+
 function formatDateTime(value) {
   if (!value) return "未设置时间";
   const date = new Date(value);
@@ -37,12 +44,16 @@ function loadTodos() {
   }
 }
 
+function getNotificationStatusLabel(status) {
+  return notificationStatusLabels[status] || status;
+}
+
 export default function App() {
   const [todos, setTodos] = useState(loadTodos);
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
   const [notificationReady, setNotificationReady] = useState(
-    typeof Notification !== "undefined" ? Notification.permission : "default"
+    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
   const [form, setForm] = useState({
     title: "",
@@ -198,14 +209,16 @@ export default function App() {
           <button
             className="notify-button"
             onClick={requestNotification}
-            disabled={notificationReady === "granted"}
+            disabled={notificationReady === "granted" || notificationReady === "unsupported"}
           >
             {notificationReady === "granted"
-              ? "已开启通知提醒"
-              : "开启浏览器提醒"}
+              ? "已开启浏览器提醒"
+              : notificationReady === "unsupported"
+                ? "当前浏览器不支持通知"
+                : "开启浏览器提醒"}
           </button>
           <p className="notify-tip">
-            当前通知权限：<strong>{notificationReady}</strong>
+            当前通知权限：<strong>{getNotificationStatusLabel(notificationReady)}</strong>
           </p>
         </div>
       </section>
