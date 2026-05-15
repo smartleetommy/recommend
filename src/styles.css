@@ -316,7 +316,23 @@ textarea {
   margin-top: 10px;
 }
 
-.pill {
+.tag-filters,
+.todo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-filters {
+  margin-top: 10px;
+}
+
+.todo-tags {
+  margin-top: 12px;
+}
+
+.pill,
+.tag-chip {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.66);
@@ -324,7 +340,20 @@ textarea {
   white-space: nowrap;
 }
 
-.pill.active {
+.tag-chip {
+  min-height: 34px;
+  color: var(--accent-deep);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.tag-chip.compact {
+  padding: 6px 10px;
+  background: rgba(185, 87, 56, 0.1);
+}
+
+.pill.active,
+.tag-chip.active {
   color: #fff;
   background: var(--ink);
 }
