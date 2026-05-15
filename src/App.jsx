@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
-const STORAGE_KEY = "codex-todo-reminder-items";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
+const USER_ID =
+  import.meta.env.VITE_DEMO_USER_ID || "00000000-0000-4000-8000-000000000001";
 
 const priorityOptions = [
   { value: "high", label: "高优先级" },
@@ -22,13 +24,32 @@ const notificationStatusLabels = {
   unsupported: "当前浏览器不支持"
 };
 
+const quoteOptions = [
+  {
+    text: "每一个不曾起舞的日子，都是对生命的辜负。",
+    author: "尼采"
+  },
+  {
+    text: "今日事，今日毕。",
+    author: "富兰克林"
+  },
+  {
+    text: "伟大的思想，只有付诸行动才能成为壮举。",
+    author: "赫兹里特"
+  },
+  {
+    text: "时间是最公平的秤，行动是最可靠的砝码。",
+    author: "佚名"
+  }
+];
+
 function normalizeTags(value) {
   if (!value) return [];
 
   return Array.from(
     new Set(
       value
-        .split(/[，,\s]+/)
+        .split(/[,，\s]+/)
         .map((tag) => tag.trim())
         .filter(Boolean)
     )
@@ -48,24 +69,37 @@ function formatDateTime(value) {
   }).format(date);
 }
 
-function loadTodos() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
 function getNotificationStatusLabel(status) {
   return notificationStatusLabels[status] || status;
 }
 
+async function requestJson(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Id": USER_ID,
+      ...options.headers
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || "请求失败");
+  }
+
+  return data;
+}
+
 export default function App() {
-  const [todos, setTodos] = useState(loadTodos);
+  const [todos, setTodos] = useState([]);
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
   const [selectedTag, setSelectedTag] = useState("all");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [quoteIndex, setQuoteIndex] = useState(0);
   const [notificationReady, setNotificationReady] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
@@ -79,8 +113,16 @@ export default function App() {
   });
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-  }, [todos]);
+    loadTodos();
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setQuoteIndex((current) => (current + 1) % quoteOptions.length);
+    }, 5200);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -100,6 +142,11 @@ export default function App() {
               });
             }
 
+            requestJson(`/api/todo-plans/${todo.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ notified: true })
+            }).catch(() => {});
+
             return { ...todo, notified: true };
           }
 
@@ -110,6 +157,20 @@ export default function App() {
 
     return () => window.clearInterval(timer);
   }, [notificationReady]);
+
+  async function loadTodos() {
+    setIsLoading(true);
+
+    try {
+      const data = await requestJson(`/api/todo-plans?userId=${USER_ID}`);
+      setTodos(Array.isArray(data.todos) ? data.todos : []);
+      setIsConnected(true);
+    } catch (error) {
+      setIsConnected(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
   const stats = useMemo(() => {
     const total = todos.length;
@@ -174,46 +235,87 @@ export default function App() {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function addTodo(event) {
+  async function addTodo(event) {
     event.preventDefault();
 
     const title = form.title.trim();
-    if (!title) return;
+    if (!title || isSaving) return;
 
-    const newTodo = {
-      id: crypto.randomUUID(),
-      title,
-      note: form.note.trim(),
-      dueAt: form.dueAt,
-      priority: form.priority,
-      remindBefore: Number(form.remindBefore),
-      tags: normalizeTags(form.tags),
-      done: false,
-      notified: false,
-      createdAt: Date.now()
-    };
+    setIsSaving(true);
 
-    setTodos((current) => [newTodo, ...current]);
-    setForm({
-      title: "",
-      note: "",
-      dueAt: "",
-      priority: "medium",
-      remindBefore: 10,
-      tags: ""
-    });
+    try {
+      const data = await requestJson("/api/todo-plans", {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          note: form.note.trim(),
+          dueAt: form.dueAt || null,
+          priority: form.priority,
+          remindBeforeMinutes: Number(form.remindBefore),
+          tags: normalizeTags(form.tags)
+        })
+      });
+
+      setTodos((current) => [data.todo, ...current]);
+      setForm({
+        title: "",
+        note: "",
+        dueAt: "",
+        priority: "medium",
+        remindBefore: 10,
+        tags: ""
+      });
+      setIsConnected(true);
+    } catch (error) {
+      setIsConnected(false);
+    } finally {
+      setIsSaving(false);
+    }
   }
 
-  function toggleTodo(id) {
+  async function toggleTodo(id) {
+    const todo = todos.find((item) => item.id === id);
+    if (!todo) return;
+
+    const nextDone = !todo.done;
     setTodos((current) =>
-      current.map((todo) =>
-        todo.id === id ? { ...todo, done: !todo.done } : todo
+      current.map((item) =>
+        item.id === id ? { ...item, done: nextDone } : item
       )
     );
+
+    try {
+      const data = await requestJson(`/api/todo-plans/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ done: nextDone })
+      });
+      setTodos((current) =>
+        current.map((item) => (item.id === id ? data.todo : item))
+      );
+      setIsConnected(true);
+    } catch (error) {
+      setTodos((current) =>
+        current.map((item) =>
+          item.id === id ? { ...item, done: todo.done } : item
+        )
+      );
+      setIsConnected(false);
+    }
   }
 
-  function removeTodo(id) {
+  async function removeTodo(id) {
+    const previous = todos;
     setTodos((current) => current.filter((todo) => todo.id !== id));
+
+    try {
+      await requestJson(`/api/todo-plans/${id}?userId=${USER_ID}`, {
+        method: "DELETE"
+      });
+      setIsConnected(true);
+    } catch (error) {
+      setTodos(previous);
+      setIsConnected(false);
+    }
   }
 
   async function requestNotification() {
@@ -228,8 +330,10 @@ export default function App() {
         <div className="hero-copy">
           <p className="eyebrow">React Todo Reminder</p>
           <h1>把待办事项排成清晰节奏</h1>
-          <p className="hero-text">
-            记录任务、设置提醒、按优先级聚焦。所有数据保存在本地浏览器里，适合日常学习、工作和个人安排。
+          <p className="hero-text quote-carousel" key={quoteIndex}>
+            <span className="quote-mark">“</span>
+            <span className="quote-line">{quoteOptions[quoteIndex].text}</span>
+            <span className="quote-author">作者：{quoteOptions[quoteIndex].author}</span>
           </p>
         </div>
 
@@ -249,8 +353,11 @@ export default function App() {
                 : "开启浏览器提醒"}
           </button>
           <p className="notify-tip">
-            当前通知权限：
+            通知权限：
             <strong>{getNotificationStatusLabel(notificationReady)}</strong>
+          </p>
+          <p className="notify-tip">
+            数据状态：<strong>{isConnected ? "已连接" : "未连接"}</strong>
           </p>
         </div>
       </section>
@@ -278,7 +385,7 @@ export default function App() {
         <form className="panel composer" onSubmit={addTodo}>
           <div className="panel-head">
             <h2>新增待办</h2>
-            <p>给任务一个明确的时间和优先级。</p>
+            <p>给任务一个明确的时间、优先级和标签。</p>
           </div>
 
           <label>
@@ -349,8 +456,8 @@ export default function App() {
             />
           </label>
 
-          <button className="primary-button" type="submit">
-            添加事项
+          <button className="primary-button" type="submit" disabled={isSaving}>
+            {isSaving ? "保存中..." : "添加事项"}
           </button>
         </form>
 
@@ -403,7 +510,12 @@ export default function App() {
           </div>
 
           <div className="todo-list">
-            {visibleTodos.length ? (
+            {isLoading ? (
+              <div className="empty-state">
+                <h3>正在加载待办</h3>
+                <p>正在从 Supabase 读取你的计划表。</p>
+              </div>
+            ) : visibleTodos.length ? (
               visibleTodos.map((todo) => (
                 <article
                   key={todo.id}

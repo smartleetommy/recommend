@@ -132,6 +132,47 @@ button:disabled {
   line-height: 1.8;
 }
 
+.quote-carousel {
+  display: grid;
+  gap: 8px;
+  min-height: 126px;
+  animation: quoteFade 520ms ease both;
+}
+
+.quote-mark {
+  color: var(--accent);
+  font-family: "Cormorant Garamond", "Noto Sans SC", serif;
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 0.7;
+}
+
+.quote-line {
+  color: var(--ink);
+  font-size: clamp(1.28rem, 3.2vw, 2rem);
+  font-weight: 800;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.quote-author {
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+@keyframes quoteFade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .hero-text,
 .panel-head p,
 .notify-tip,
