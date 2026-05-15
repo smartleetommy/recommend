@@ -199,7 +199,7 @@ export default function App() {
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">React Todo Reminder</p>
-          <h1>把待办事项排成清晰的节奏，而不是堆成焦虑。</h1>
+          <h1>把待办事项排成清晰节奏</h1>
           <p className="hero-text">
             记录任务、设置提醒、按优先级聚焦。所有数据保存在本地浏览器里，适合日常学习、工作和个人安排。
           </p>
@@ -209,7 +209,10 @@ export default function App() {
           <button
             className="notify-button"
             onClick={requestNotification}
-            disabled={notificationReady === "granted" || notificationReady === "unsupported"}
+            disabled={
+              notificationReady === "granted" ||
+              notificationReady === "unsupported"
+            }
           >
             {notificationReady === "granted"
               ? "已开启浏览器提醒"
@@ -218,12 +221,13 @@ export default function App() {
                 : "开启浏览器提醒"}
           </button>
           <p className="notify-tip">
-            当前通知权限：<strong>{getNotificationStatusLabel(notificationReady)}</strong>
+            当前通知权限：
+            <strong>{getNotificationStatusLabel(notificationReady)}</strong>
           </p>
         </div>
       </section>
 
-      <section className="dashboard">
+      <section className="dashboard" aria-label="待办统计">
         <article className="stat-card accent">
           <span>全部事项</span>
           <strong>{stats.total}</strong>
@@ -326,7 +330,7 @@ export default function App() {
                 onChange={(event) => setKeyword(event.target.value)}
                 placeholder="搜索标题或备注"
               />
-              <div className="filter-pills">
+              <div className="filter-pills" role="group" aria-label="筛选待办">
                 {filterOptions.map((option) => (
                   <button
                     key={option.value}
@@ -346,7 +350,9 @@ export default function App() {
               visibleTodos.map((todo) => (
                 <article
                   key={todo.id}
-                  className={`todo-card priority-${todo.priority} ${todo.done ? "done" : ""}`}
+                  className={`todo-card priority-${todo.priority} ${
+                    todo.done ? "done" : ""
+                  }`}
                 >
                   <div className="todo-main">
                     <div className="todo-topline">
