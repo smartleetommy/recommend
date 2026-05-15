@@ -22,6 +22,19 @@ const notificationStatusLabels = {
   unsupported: "当前浏览器不支持"
 };
 
+function normalizeTags(value) {
+  if (!value) return [];
+
+  return Array.from(
+    new Set(
+      value
+        .split(/[，,\s]+/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
 function formatDateTime(value) {
   if (!value) return "未设置时间";
   const date = new Date(value);
@@ -52,6 +65,7 @@ export default function App() {
   const [todos, setTodos] = useState(loadTodos);
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
+  const [selectedTag, setSelectedTag] = useState("all");
   const [notificationReady, setNotificationReady] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
@@ -60,7 +74,8 @@ export default function App() {
     note: "",
     dueAt: "",
     priority: "medium",
-    remindBefore: 10
+    remindBefore: 10,
+    tags: ""
   });
 
   useEffect(() => {
@@ -111,18 +126,29 @@ export default function App() {
     return { total, done, urgent, upcoming };
   }, [todos]);
 
+  const allTags = useMemo(() => {
+    return Array.from(
+      new Set(todos.flatMap((todo) => (Array.isArray(todo.tags) ? todo.tags : [])))
+    ).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [todos]);
+
   const visibleTodos = useMemo(() => {
     const today = new Date();
     const todayKey = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
 
     return todos
       .filter((todo) => {
+        const todoTags = Array.isArray(todo.tags) ? todo.tags : [];
+        const normalizedKeyword = keyword.toLowerCase();
         const matchedKeyword =
-          !keyword ||
-          todo.title.toLowerCase().includes(keyword.toLowerCase()) ||
-          todo.note.toLowerCase().includes(keyword.toLowerCase());
+          !normalizedKeyword ||
+          todo.title.toLowerCase().includes(normalizedKeyword) ||
+          (todo.note || "").toLowerCase().includes(normalizedKeyword) ||
+          todoTags.some((tag) => tag.toLowerCase().includes(normalizedKeyword));
+        const matchedTag =
+          selectedTag === "all" || todoTags.includes(selectedTag);
 
-        if (!matchedKeyword) return false;
+        if (!matchedKeyword || !matchedTag) return false;
         if (filter === "pending") return !todo.done;
         if (filter === "done") return todo.done;
 
@@ -142,7 +168,7 @@ export default function App() {
         if (!b.dueAt) return -1;
         return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
       });
-  }, [todos, keyword, filter]);
+  }, [todos, keyword, filter, selectedTag]);
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -161,6 +187,7 @@ export default function App() {
       dueAt: form.dueAt,
       priority: form.priority,
       remindBefore: Number(form.remindBefore),
+      tags: normalizeTags(form.tags),
       done: false,
       notified: false,
       createdAt: Date.now()
@@ -172,7 +199,8 @@ export default function App() {
       note: "",
       dueAt: "",
       priority: "medium",
-      remindBefore: 10
+      remindBefore: 10,
+      tags: ""
     });
   }
 
@@ -312,6 +340,15 @@ export default function App() {
             </select>
           </label>
 
+          <label>
+            <span>标签</span>
+            <input
+              value={form.tags}
+              onChange={(event) => updateForm("tags", event.target.value)}
+              placeholder="用空格或逗号分隔，比如：工作 重要"
+            />
+          </label>
+
           <button className="primary-button" type="submit">
             添加事项
           </button>
@@ -321,14 +358,14 @@ export default function App() {
           <div className="panel-head row">
             <div>
               <h2>待办清单</h2>
-              <p>按关键词或状态快速聚焦。</p>
+              <p>按关键词、状态或标签快速聚焦。</p>
             </div>
 
             <div className="filters">
               <input
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索标题或备注"
+                placeholder="搜索标题、备注或标签"
               />
               <div className="filter-pills" role="group" aria-label="筛选待办">
                 {filterOptions.map((option) => (
@@ -339,6 +376,26 @@ export default function App() {
                     onClick={() => setFilter(option.value)}
                   >
                     {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="tag-filters" role="group" aria-label="按标签筛选待办">
+                <button
+                  className={`tag-chip ${selectedTag === "all" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setSelectedTag("all")}
+                >
+                  全部标签
+                </button>
+                {allTags.map((tag) => (
+                  <button
+                    key={tag}
+                    className={`tag-chip ${selectedTag === tag ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setSelectedTag(tag)}
+                  >
+                    #{tag}
                   </button>
                 ))}
               </div>
@@ -367,6 +424,20 @@ export default function App() {
                     </div>
                     <h3>{todo.title}</h3>
                     <p>{todo.note || "这个事项还没有补充备注。"}</p>
+                    {Array.isArray(todo.tags) && todo.tags.length > 0 ? (
+                      <div className="todo-tags" aria-label="待办标签">
+                        {todo.tags.map((tag) => (
+                          <button
+                            key={tag}
+                            className="tag-chip compact"
+                            type="button"
+                            onClick={() => setSelectedTag(tag)}
+                          >
+                            #{tag}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="todo-actions">
