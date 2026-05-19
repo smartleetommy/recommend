@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 const USER_STORAGE_KEY = "todo-reminder-current-user";
+const DEFAULT_FOLDER = "默认";
 
 const priorityOptions = [
   { value: "high", label: "高优先级" },
@@ -14,6 +15,14 @@ const filterOptions = [
   { value: "pending", label: "进行中" },
   { value: "done", label: "已完成" },
   { value: "today", label: "今天到期" }
+];
+
+const recurrenceOptions = [
+  { value: "none", label: "不重复" },
+  { value: "daily", label: "每天" },
+  { value: "weekly", label: "每周" },
+  { value: "monthly", label: "每月" },
+  { value: "yearly", label: "每年" }
 ];
 
 const notificationStatusLabels = {
@@ -42,6 +51,19 @@ const quoteOptions = [
   }
 ];
 
+const emptyForm = {
+  title: "",
+  note: "",
+  dueAt: "",
+  priority: "medium",
+  remindBefore: 10,
+  tags: "",
+  folder: DEFAULT_FOLDER,
+  recurrence: "none",
+  progressCurrent: 0,
+  progressTotal: 7
+};
+
 function normalizeTags(value) {
   if (!value) return [];
 
@@ -53,6 +75,33 @@ function normalizeTags(value) {
         .filter(Boolean)
     )
   );
+}
+
+function normalizeTodo(todo) {
+  return {
+    ...todo,
+    tags: Array.isArray(todo.tags) ? todo.tags : [],
+    folder: todo.folder || DEFAULT_FOLDER,
+    recurrence: todo.recurrence || "none",
+    sortOrder: Number.isFinite(Number(todo.sortOrder))
+      ? Number(todo.sortOrder)
+      : todo.createdAt || Date.now(),
+    progressCurrent: Number.isFinite(Number(todo.progressCurrent))
+      ? Number(todo.progressCurrent)
+      : 0,
+    progressTotal: Number.isFinite(Number(todo.progressTotal))
+      ? Math.max(1, Number(todo.progressTotal))
+      : 1
+  };
+}
+
+function toDatetimeLocal(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return localDate.toISOString().slice(0, 16);
 }
 
 function formatDateTime(value) {
@@ -128,6 +177,20 @@ function readStoredUser() {
   return null;
 }
 
+function addRecurringInterval(value, recurrence) {
+  if (!value || recurrence === "none") return value || null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  if (recurrence === "daily") date.setDate(date.getDate() + 1);
+  if (recurrence === "weekly") date.setDate(date.getDate() + 7);
+  if (recurrence === "monthly") date.setMonth(date.getMonth() + 1);
+  if (recurrence === "yearly") date.setFullYear(date.getFullYear() + 1);
+
+  return date.toISOString();
+}
+
 async function requestJson(path, userId, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -153,6 +216,8 @@ export default function App() {
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
   const [selectedTag, setSelectedTag] = useState("all");
+  const [selectedFolder, setSelectedFolder] = useState("all");
+  const [editingId, setEditingId] = useState(null);
   const [isLoading, setIsLoading] = useState(Boolean(currentUser));
   const [isSaving, setIsSaving] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -160,14 +225,7 @@ export default function App() {
   const [notificationReady, setNotificationReady] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
-  const [form, setForm] = useState({
-    title: "",
-    note: "",
-    dueAt: "",
-    priority: "medium",
-    remindBefore: 10,
-    tags: ""
-  });
+  const [form, setForm] = useState(emptyForm);
 
   useEffect(() => {
     if (!currentUser?.id) {
@@ -231,9 +289,9 @@ export default function App() {
 
     try {
       const data = await requestJson("/api/todo-plans", userId);
-      setTodos(Array.isArray(data.todos) ? data.todos : []);
+      setTodos(Array.isArray(data.todos) ? data.todos.map(normalizeTodo) : []);
       setIsConnected(true);
-    } catch (error) {
+    } catch {
       setIsConnected(false);
     } finally {
       setIsLoading(false);
@@ -243,22 +301,26 @@ export default function App() {
   const stats = useMemo(() => {
     const total = todos.length;
     const done = todos.filter((item) => item.done).length;
-    const urgent = todos.filter(
-      (item) => !item.done && item.priority === "high"
-    ).length;
+    const recurring = todos.filter((item) => item.recurrence !== "none").length;
     const upcoming = todos.filter((item) => {
       if (!item.dueAt || item.done) return false;
       const diff = new Date(item.dueAt).getTime() - Date.now();
       return diff > 0 && diff <= 24 * 60 * 60 * 1000;
     }).length;
 
-    return { total, done, urgent, upcoming };
+    return { total, done, recurring, upcoming };
   }, [todos]);
 
   const allTags = useMemo(() => {
-    return Array.from(
-      new Set(todos.flatMap((todo) => (Array.isArray(todo.tags) ? todo.tags : [])))
-    ).sort((a, b) => a.localeCompare(b, "zh-CN"));
+    return Array.from(new Set(todos.flatMap((todo) => todo.tags))).sort((a, b) =>
+      a.localeCompare(b, "zh-CN")
+    );
+  }, [todos]);
+
+  const allFolders = useMemo(() => {
+    return Array.from(new Set(todos.map((todo) => todo.folder || DEFAULT_FOLDER))).sort(
+      (a, b) => a.localeCompare(b, "zh-CN")
+    );
   }, [todos]);
 
   const visibleTodos = useMemo(() => {
@@ -267,17 +329,18 @@ export default function App() {
 
     return todos
       .filter((todo) => {
-        const todoTags = Array.isArray(todo.tags) ? todo.tags : [];
         const normalizedKeyword = keyword.toLowerCase();
         const matchedKeyword =
           !normalizedKeyword ||
           todo.title.toLowerCase().includes(normalizedKeyword) ||
           (todo.note || "").toLowerCase().includes(normalizedKeyword) ||
-          todoTags.some((tag) => tag.toLowerCase().includes(normalizedKeyword));
-        const matchedTag =
-          selectedTag === "all" || todoTags.includes(selectedTag);
+          todo.folder.toLowerCase().includes(normalizedKeyword) ||
+          todo.tags.some((tag) => tag.toLowerCase().includes(normalizedKeyword));
+        const matchedTag = selectedTag === "all" || todo.tags.includes(selectedTag);
+        const matchedFolder =
+          selectedFolder === "all" || todo.folder === selectedFolder;
 
-        if (!matchedKeyword || !matchedTag) return false;
+        if (!matchedKeyword || !matchedTag || !matchedFolder) return false;
         if (filter === "pending") return !todo.done;
         if (filter === "done") return todo.done;
 
@@ -291,16 +354,18 @@ export default function App() {
         return true;
       })
       .sort((a, b) => {
-        if (a.done !== b.done) return Number(a.done) - Number(b.done);
-        if (!a.dueAt && !b.dueAt) return b.createdAt - a.createdAt;
-        if (!a.dueAt) return 1;
-        if (!b.dueAt) return -1;
-        return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+        return (b.createdAt || 0) - (a.createdAt || 0);
       });
-  }, [todos, keyword, filter, selectedTag]);
+  }, [todos, keyword, filter, selectedTag, selectedFolder]);
 
   function updateForm(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function resetComposer() {
+    setEditingId(null);
+    setForm(emptyForm);
   }
 
   function handleLogin(event) {
@@ -316,6 +381,7 @@ export default function App() {
 
     window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(nextUser));
     setSelectedTag("all");
+    setSelectedFolder("all");
     setKeyword("");
     setFilter("all");
     setCurrentUser(nextUser);
@@ -325,9 +391,31 @@ export default function App() {
     window.localStorage.removeItem(USER_STORAGE_KEY);
     setCurrentUser(null);
     setLoginName("");
+    resetComposer();
   }
 
-  async function addTodo(event) {
+  function createPayload(title) {
+    const recurrence = form.recurrence;
+    const progressTotal = Math.max(1, Number(form.progressTotal) || 1);
+
+    return {
+      title,
+      note: form.note.trim(),
+      dueAt: form.dueAt || null,
+      priority: form.priority,
+      remindBeforeMinutes: Number(form.remindBefore),
+      tags: normalizeTags(form.tags),
+      folder: form.folder.trim() || DEFAULT_FOLDER,
+      recurrence,
+      progressCurrent:
+        recurrence === "none"
+          ? 0
+          : Math.min(progressTotal, Math.max(0, Number(form.progressCurrent) || 0)),
+      progressTotal: recurrence === "none" ? 1 : progressTotal
+    };
+  }
+
+  async function saveTodo(event) {
     event.preventDefault();
 
     const title = form.title.trim();
@@ -336,65 +424,110 @@ export default function App() {
     setIsSaving(true);
 
     try {
-      const data = await requestJson("/api/todo-plans", currentUser.id, {
-        method: "POST",
+      const payload = createPayload(title);
+      const path = editingId ? `/api/todo-plans/${editingId}` : "/api/todo-plans";
+      const data = await requestJson(path, currentUser.id, {
+        method: editingId ? "PATCH" : "POST",
         body: JSON.stringify({
-          title,
-          note: form.note.trim(),
-          dueAt: form.dueAt || null,
-          priority: form.priority,
-          remindBeforeMinutes: Number(form.remindBefore),
-          tags: normalizeTags(form.tags)
+          ...payload,
+          sortOrder: editingId
+            ? todos.find((todo) => todo.id === editingId)?.sortOrder
+            : Math.max(0, ...todos.map((todo) => todo.sortOrder || 0)) + 1000
         })
       });
 
-      setTodos((current) => [data.todo, ...current]);
-      setForm({
-        title: "",
-        note: "",
-        dueAt: "",
-        priority: "medium",
-        remindBefore: 10,
-        tags: ""
-      });
+      const savedTodo = normalizeTodo(data.todo);
+      setTodos((current) =>
+        editingId
+          ? current.map((todo) => (todo.id === editingId ? savedTodo : todo))
+          : [...current, savedTodo]
+      );
+      setSelectedFolder(savedTodo.folder);
+      resetComposer();
       setIsConnected(true);
-    } catch (error) {
+    } catch {
       setIsConnected(false);
     } finally {
       setIsSaving(false);
     }
   }
 
-  async function toggleTodo(id) {
+  function editTodo(todo) {
+    setEditingId(todo.id);
+    setForm({
+      title: todo.title,
+      note: todo.note || "",
+      dueAt: toDatetimeLocal(todo.dueAt),
+      priority: todo.priority,
+      remindBefore: todo.remindBefore,
+      tags: todo.tags.join(" "),
+      folder: todo.folder || DEFAULT_FOLDER,
+      recurrence: todo.recurrence || "none",
+      progressCurrent: todo.progressCurrent || 0,
+      progressTotal: todo.progressTotal || 1
+    });
+  }
+
+  async function patchTodo(id, body, rollback) {
     if (!currentUser?.id) return;
-
-    const todo = todos.find((item) => item.id === id);
-    if (!todo) return;
-
-    const nextDone = !todo.done;
-    setTodos((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, done: nextDone } : item
-      )
-    );
 
     try {
       const data = await requestJson(`/api/todo-plans/${id}`, currentUser.id, {
         method: "PATCH",
-        body: JSON.stringify({ done: nextDone })
+        body: JSON.stringify(body)
       });
+      const savedTodo = normalizeTodo(data.todo);
       setTodos((current) =>
-        current.map((item) => (item.id === id ? data.todo : item))
+        current.map((item) => (item.id === id ? savedTodo : item))
       );
       setIsConnected(true);
-    } catch (error) {
-      setTodos((current) =>
-        current.map((item) =>
-          item.id === id ? { ...item, done: todo.done } : item
-        )
-      );
+    } catch {
+      if (rollback) setTodos(rollback);
       setIsConnected(false);
     }
+  }
+
+  async function toggleTodo(id) {
+    const todo = todos.find((item) => item.id === id);
+    if (!todo) return;
+
+    const previous = todos;
+
+    if (todo.recurrence !== "none" && !todo.done) {
+      const nextProgress = Math.min(
+        todo.progressTotal,
+        (todo.progressCurrent || 0) + 1
+      );
+      const isComplete = nextProgress >= todo.progressTotal;
+      const optimistic = {
+        ...todo,
+        done: isComplete,
+        notified: false,
+        progressCurrent: nextProgress,
+        dueAt: isComplete ? todo.dueAt : addRecurringInterval(todo.dueAt, todo.recurrence)
+      };
+
+      setTodos((current) =>
+        current.map((item) => (item.id === id ? optimistic : item))
+      );
+      await patchTodo(
+        id,
+        {
+          done: isComplete,
+          notified: false,
+          progressCurrent: nextProgress,
+          dueAt: optimistic.dueAt
+        },
+        previous
+      );
+      return;
+    }
+
+    const nextDone = !todo.done;
+    setTodos((current) =>
+      current.map((item) => (item.id === id ? { ...item, done: nextDone } : item))
+    );
+    await patchTodo(id, { done: nextDone }, previous);
   }
 
   async function removeTodo(id) {
@@ -407,8 +540,44 @@ export default function App() {
       await requestJson(`/api/todo-plans/${id}`, currentUser.id, {
         method: "DELETE"
       });
+      if (editingId === id) resetComposer();
       setIsConnected(true);
-    } catch (error) {
+    } catch {
+      setTodos(previous);
+      setIsConnected(false);
+    }
+  }
+
+  async function moveTodo(id, direction) {
+    const index = visibleTodos.findIndex((todo) => todo.id === id);
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (index < 0 || targetIndex < 0 || targetIndex >= visibleTodos.length) return;
+
+    const source = visibleTodos[index];
+    const target = visibleTodos[targetIndex];
+    const previous = todos;
+
+    setTodos((current) =>
+      current.map((todo) => {
+        if (todo.id === source.id) return { ...todo, sortOrder: target.sortOrder };
+        if (todo.id === target.id) return { ...todo, sortOrder: source.sortOrder };
+        return todo;
+      })
+    );
+
+    try {
+      await Promise.all([
+        requestJson(`/api/todo-plans/${source.id}`, currentUser.id, {
+          method: "PATCH",
+          body: JSON.stringify({ sortOrder: target.sortOrder })
+        }),
+        requestJson(`/api/todo-plans/${target.id}`, currentUser.id, {
+          method: "PATCH",
+          body: JSON.stringify({ sortOrder: source.sortOrder })
+        })
+      ]);
+      setIsConnected(true);
+    } catch {
       setTodos(previous);
       setIsConnected(false);
     }
@@ -429,14 +598,18 @@ export default function App() {
           <p className="hero-text quote-carousel" key={quoteIndex}>
             <span className="quote-mark">“</span>
             <span className="quote-line">{quoteOptions[quoteIndex].text}</span>
-            <span className="quote-author">作者：{quoteOptions[quoteIndex].author}</span>
+            <span className="quote-author">
+              作者：{quoteOptions[quoteIndex].author}
+            </span>
           </p>
         </div>
 
         <div className="hero-actions">
           {currentUser ? (
             <div className="account-panel">
-              <p className="notify-tip">当前用户：<strong>{currentUser.name}</strong></p>
+              <p className="notify-tip">
+                当前用户：<strong>{currentUser.name}</strong>
+              </p>
               <button className="account-button" type="button" onClick={handleLogout}>
                 切换用户
               </button>
@@ -471,13 +644,30 @@ export default function App() {
                 ? "当前浏览器不支持通知"
                 : "开启浏览器提醒"}
           </button>
-          <p className="notify-tip">
-            通知权限：
-            <strong>{getNotificationStatusLabel(notificationReady)}</strong>
-          </p>
-          <p className="notify-tip">
-            数据状态：<strong>{isConnected ? "已连接" : "未连接"}</strong>
-          </p>
+          <div className="status-list" aria-label="应用状态">
+            <span
+              className="status-row"
+              aria-label={`通知权限：${getNotificationStatusLabel(notificationReady)}`}
+              title={`通知权限：${getNotificationStatusLabel(notificationReady)}`}
+            >
+              <span
+                className={`status-dot ${
+                  notificationReady === "granted" ? "ok" : "error"
+                }`}
+                aria-hidden="true"
+              />
+            </span>
+            <span
+              className="status-row"
+              aria-label={`数据状态：${isConnected ? "已连接" : "未连接"}`}
+              title={`数据状态：${isConnected ? "已连接" : "未连接"}`}
+            >
+              <span
+                className={`status-dot ${isConnected ? "ok" : "error"}`}
+                aria-hidden="true"
+              />
+            </span>
+          </div>
         </div>
       </section>
 
@@ -493,8 +683,8 @@ export default function App() {
               <strong>{stats.done}</strong>
             </article>
             <article className="stat-card">
-              <span>高优先级</span>
-              <strong>{stats.urgent}</strong>
+              <span>重复任务</span>
+              <strong>{stats.recurring}</strong>
             </article>
             <article className="stat-card">
               <span>24 小时内到期</span>
@@ -503,198 +693,355 @@ export default function App() {
           </section>
 
           <section className="workspace">
-        <form className="panel composer" onSubmit={addTodo}>
-          <div className="panel-head">
-            <h2>新增待办</h2>
-            <p>给任务一个明确的时间、优先级和标签。</p>
-          </div>
-
-          <label>
-            <span>事项标题</span>
-            <input
-              value={form.title}
-              onChange={(event) => updateForm("title", event.target.value)}
-              placeholder="比如：整理周报，19:00 前发出"
-            />
-          </label>
-
-          <label>
-            <span>补充备注</span>
-            <textarea
-              rows="4"
-              value={form.note}
-              onChange={(event) => updateForm("note", event.target.value)}
-              placeholder="记录细节、会议链接或执行步骤"
-            />
-          </label>
-
-          <div className="grid-two">
-            <label>
-              <span>截止时间</span>
-              <input
-                type="datetime-local"
-                value={form.dueAt}
-                onChange={(event) => updateForm("dueAt", event.target.value)}
-              />
-            </label>
-
-            <label>
-              <span>优先级</span>
-              <select
-                value={form.priority}
-                onChange={(event) => updateForm("priority", event.target.value)}
-              >
-                {priorityOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <label>
-            <span>提前提醒</span>
-            <select
-              value={form.remindBefore}
-              onChange={(event) =>
-                updateForm("remindBefore", event.target.value)
-              }
-            >
-              <option value="5">提前 5 分钟</option>
-              <option value="10">提前 10 分钟</option>
-              <option value="30">提前 30 分钟</option>
-              <option value="60">提前 1 小时</option>
-            </select>
-          </label>
-
-          <label>
-            <span>标签</span>
-            <input
-              value={form.tags}
-              onChange={(event) => updateForm("tags", event.target.value)}
-              placeholder="用空格或逗号分隔，比如：工作 重要"
-            />
-          </label>
-
-          <button className="primary-button" type="submit" disabled={isSaving}>
-            {isSaving ? "保存中..." : "添加事项"}
-          </button>
-        </form>
-
-        <section className="panel list-panel">
-          <div className="panel-head row">
-            <div>
-              <h2>待办清单</h2>
-              <p>按关键词、状态或标签快速聚焦。</p>
-            </div>
-
-            <div className="filters">
-              <input
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索标题、备注或标签"
-              />
-              <div className="filter-pills" role="group" aria-label="筛选待办">
-                {filterOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    className={`pill ${filter === option.value ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setFilter(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
+            <form className="panel composer" onSubmit={saveTodo}>
+              <div className="panel-head">
+                <h2>{editingId ? "编辑待办" : "新增待办"}</h2>
+                <p>设置时间、分类、重复节奏和进度目标。</p>
               </div>
 
-              <div className="tag-filters" role="group" aria-label="按标签筛选待办">
-                <button
-                  className={`tag-chip ${selectedTag === "all" ? "active" : ""}`}
-                  type="button"
-                  onClick={() => setSelectedTag("all")}
-                >
-                  全部标签
+              <label>
+                <span>事项标题</span>
+                <input
+                  value={form.title}
+                  onChange={(event) => updateForm("title", event.target.value)}
+                  placeholder="比如：整理周报，19:00 前发出"
+                />
+              </label>
+
+              <label>
+                <span>补充备注</span>
+                <textarea
+                  rows="4"
+                  value={form.note}
+                  onChange={(event) => updateForm("note", event.target.value)}
+                  placeholder="记录细节、会议链接或执行步骤"
+                />
+              </label>
+
+              <div className="grid-two">
+                <label>
+                  <span>截止时间</span>
+                  <input
+                    type="datetime-local"
+                    value={form.dueAt}
+                    onChange={(event) => updateForm("dueAt", event.target.value)}
+                  />
+                </label>
+
+                <label>
+                  <span>优先级</span>
+                  <select
+                    value={form.priority}
+                    onChange={(event) => updateForm("priority", event.target.value)}
+                  >
+                    {priorityOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="grid-two">
+                <label>
+                  <span>重复频次</span>
+                  <select
+                    value={form.recurrence}
+                    onChange={(event) => updateForm("recurrence", event.target.value)}
+                  >
+                    {recurrenceOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>提前提醒</span>
+                  <select
+                    value={form.remindBefore}
+                    onChange={(event) =>
+                      updateForm("remindBefore", event.target.value)
+                    }
+                  >
+                    <option value="5">提前 5 分钟</option>
+                    <option value="10">提前 10 分钟</option>
+                    <option value="30">提前 30 分钟</option>
+                    <option value="60">提前 1 小时</option>
+                  </select>
+                </label>
+              </div>
+
+              {form.recurrence !== "none" ? (
+                <div className="grid-two">
+                  <label>
+                    <span>已完成次数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={form.progressCurrent}
+                      onChange={(event) =>
+                        updateForm("progressCurrent", event.target.value)
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    <span>目标次数</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={form.progressTotal}
+                      onChange={(event) =>
+                        updateForm("progressTotal", event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              <label>
+                <span>文件夹</span>
+                <input
+                  value={form.folder}
+                  onChange={(event) => updateForm("folder", event.target.value)}
+                  placeholder="比如：工作、学习、家庭"
+                  list="folder-options"
+                />
+                <datalist id="folder-options">
+                  {allFolders.map((folder) => (
+                    <option key={folder} value={folder} />
+                  ))}
+                </datalist>
+              </label>
+
+              <label>
+                <span>标签</span>
+                <input
+                  value={form.tags}
+                  onChange={(event) => updateForm("tags", event.target.value)}
+                  placeholder="用空格或逗号分隔，比如：工作 重要"
+                />
+              </label>
+
+              <div className="composer-actions">
+                {editingId ? (
+                  <button className="secondary-button" type="button" onClick={resetComposer}>
+                    取消编辑
+                  </button>
+                ) : null}
+                <button className="primary-button" type="submit" disabled={isSaving}>
+                  {isSaving ? "保存中..." : editingId ? "保存修改" : "添加事项"}
                 </button>
-                {allTags.map((tag) => (
-                  <button
-                    key={tag}
-                    className={`tag-chip ${selectedTag === tag ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setSelectedTag(tag)}
-                  >
-                    #{tag}
-                  </button>
-                ))}
               </div>
-            </div>
-          </div>
+            </form>
 
-          <div className="todo-list">
-            {isLoading ? (
-              <div className="empty-state">
-                <h3>正在加载待办</h3>
-                <p>正在从 Supabase 读取你的计划表。</p>
-              </div>
-            ) : visibleTodos.length ? (
-              visibleTodos.map((todo) => (
-                <article
-                  key={todo.id}
-                  className={`todo-card priority-${todo.priority} ${
-                    todo.done ? "done" : ""
-                  }`}
-                >
-                  <div className="todo-main">
-                    <div className="todo-topline">
-                      <span className="badge">
-                        {
-                          priorityOptions.find(
-                            (item) => item.value === todo.priority
-                          )?.label
-                        }
-                      </span>
-                      <span className="due">{formatDateTime(todo.dueAt)}</span>
-                    </div>
-                    <h3>{todo.title}</h3>
-                    <p>{todo.note || "这个事项还没有补充备注。"}</p>
-                    {Array.isArray(todo.tags) && todo.tags.length > 0 ? (
-                      <div className="todo-tags" aria-label="待办标签">
-                        {todo.tags.map((tag) => (
-                          <button
-                            key={tag}
-                            className="tag-chip compact"
-                            type="button"
-                            onClick={() => setSelectedTag(tag)}
-                          >
-                            #{tag}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
+            <section className="panel list-panel">
+              <div className="panel-head row">
+                <div>
+                  <h2>待办清单</h2>
+                  <p>按关键词、状态、标签或文件夹快速聚焦。</p>
+                </div>
+
+                <div className="filters">
+                  <input
+                    value={keyword}
+                    onChange={(event) => setKeyword(event.target.value)}
+                    placeholder="搜索标题、备注、文件夹或标签"
+                  />
+                  <div className="filter-pills" role="group" aria-label="筛选待办">
+                    {filterOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        className={`pill ${filter === option.value ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setFilter(option.value)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
                   </div>
 
-                  <div className="todo-actions">
-                    <button type="button" onClick={() => toggleTodo(todo.id)}>
-                      {todo.done ? "恢复" : "完成"}
-                    </button>
+                  <div className="tag-filters" role="group" aria-label="按文件夹筛选待办">
                     <button
+                      className={`tag-chip ${selectedFolder === "all" ? "active" : ""}`}
                       type="button"
-                      className="ghost"
-                      onClick={() => removeTodo(todo.id)}
+                      onClick={() => setSelectedFolder("all")}
                     >
-                      删除
+                      全部文件夹
                     </button>
+                    {allFolders.map((folder) => (
+                      <button
+                        key={folder}
+                        className={`tag-chip ${
+                          selectedFolder === folder ? "active" : ""
+                        }`}
+                        type="button"
+                        onClick={() => setSelectedFolder(folder)}
+                      >
+                        {folder}
+                      </button>
+                    ))}
                   </div>
-                </article>
-              ))
-            ) : (
-              <div className="empty-state">
-                <h3>还没有匹配的事项</h3>
-                <p>先添加一个待办，或者换个筛选条件看看。</p>
+
+                  <div className="tag-filters" role="group" aria-label="按标签筛选待办">
+                    <button
+                      className={`tag-chip ${selectedTag === "all" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setSelectedTag("all")}
+                    >
+                      全部标签
+                    </button>
+                    {allTags.map((tag) => (
+                      <button
+                        key={tag}
+                        className={`tag-chip ${selectedTag === tag ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setSelectedTag(tag)}
+                      >
+                        #{tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-            )}
-          </div>
-        </section>
+
+              <div className="todo-list">
+                {isLoading ? (
+                  <div className="empty-state">
+                    <h3>正在加载待办</h3>
+                    <p>正在从 Supabase 读取你的计划表。</p>
+                  </div>
+                ) : visibleTodos.length ? (
+                  visibleTodos.map((todo, index) => {
+                    const isRecurring = todo.recurrence !== "none";
+                    const progressPercent = Math.min(
+                      100,
+                      Math.round((todo.progressCurrent / todo.progressTotal) * 100)
+                    );
+
+                    return (
+                      <article
+                        key={todo.id}
+                        className={`todo-card priority-${todo.priority} ${
+                          todo.done ? "done" : ""
+                        }`}
+                      >
+                        <div className="todo-main">
+                          <div className="todo-topline">
+                            <span className="badge">
+                              {
+                                priorityOptions.find(
+                                  (item) => item.value === todo.priority
+                                )?.label
+                              }
+                            </span>
+                            <span className="due">{formatDateTime(todo.dueAt)}</span>
+                          </div>
+                          <h3>{todo.title}</h3>
+                          <p>{todo.note || "这个事项还没有补充备注。"}</p>
+
+                          <div className="todo-meta">
+                            <button
+                              className="tag-chip compact"
+                              type="button"
+                              onClick={() => setSelectedFolder(todo.folder)}
+                            >
+                              {todo.folder}
+                            </button>
+                            {isRecurring ? (
+                              <span className="recurrence-chip">
+                                {
+                                  recurrenceOptions.find(
+                                    (item) => item.value === todo.recurrence
+                                  )?.label
+                                }
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {isRecurring ? (
+                            <div className="progress-block">
+                              <div className="progress-line">
+                                <span>完成进度</span>
+                                <strong>
+                                  {todo.progressCurrent}/{todo.progressTotal}
+                                </strong>
+                              </div>
+                              <div className="progress-track" aria-hidden="true">
+                                <span style={{ width: `${progressPercent}%` }} />
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {todo.tags.length > 0 ? (
+                            <div className="todo-tags" aria-label="待办标签">
+                              {todo.tags.map((tag) => (
+                                <button
+                                  key={tag}
+                                  className="tag-chip compact"
+                                  type="button"
+                                  onClick={() => setSelectedTag(tag)}
+                                >
+                                  #{tag}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="todo-actions">
+                          <div className="move-actions">
+                            <button
+                              type="button"
+                              className="ghost icon-button"
+                              disabled={index === 0}
+                              onClick={() => moveTodo(todo.id, "up")}
+                              title="上移"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost icon-button"
+                              disabled={index === visibleTodos.length - 1}
+                              onClick={() => moveTodo(todo.id, "down")}
+                              title="下移"
+                            >
+                              ↓
+                            </button>
+                          </div>
+                          <button type="button" onClick={() => toggleTodo(todo.id)}>
+                            {todo.done
+                              ? "恢复"
+                              : isRecurring
+                                ? "完成一次"
+                                : "完成"}
+                          </button>
+                          <button type="button" className="ghost" onClick={() => editTodo(todo)}>
+                            修改
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost danger"
+                            onClick={() => removeTodo(todo.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })
+                ) : (
+                  <div className="empty-state">
+                    <h3>还没有匹配的事项</h3>
+                    <p>先添加一个待办，或者换个筛选条件看看。</p>
+                  </div>
+                )}
+              </div>
+            </section>
           </section>
         </>
       ) : (
