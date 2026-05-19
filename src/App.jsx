@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
-const USER_ID =
-  import.meta.env.VITE_DEMO_USER_ID || "00000000-0000-4000-8000-000000000001";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const USER_STORAGE_KEY = "todo-reminder-current-user";
 
 const priorityOptions = [
   { value: "high", label: "高优先级" },
@@ -73,12 +72,68 @@ function getNotificationStatusLabel(status) {
   return notificationStatusLabels[status] || status;
 }
 
-async function requestJson(path, options = {}) {
+function normalizeUserName(value) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function createUserIdFromName(name) {
+  const input = normalizeUserName(name).toLowerCase();
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  let h3 = 0x9e3779b9;
+  let h4 = 0x85ebca6b;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+    h3 = Math.imul(h3 ^ code, 2246822507);
+    h4 = Math.imul(h4 ^ code, 3266489909);
+  }
+
+  const bytes = [h1, h2, h3, h4].flatMap((value) => {
+    const number = value >>> 0;
+    return [
+      (number >>> 24) & 255,
+      (number >>> 16) & 255,
+      (number >>> 8) & 255,
+      number & 255
+    ];
+  });
+
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+
+  const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join("")
+  ].join("-");
+}
+
+function readStoredUser() {
+  try {
+    const raw = window.localStorage.getItem(USER_STORAGE_KEY);
+    if (!raw) return null;
+
+    const user = JSON.parse(raw);
+    if (user?.name && user?.id) return user;
+  } catch {
+    window.localStorage.removeItem(USER_STORAGE_KEY);
+  }
+
+  return null;
+}
+
+async function requestJson(path, userId, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-User-Id": USER_ID,
+      "X-User-Id": userId,
       ...options.headers
     }
   });
@@ -92,11 +147,13 @@ async function requestJson(path, options = {}) {
 }
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState(readStoredUser);
+  const [loginName, setLoginName] = useState(currentUser?.name || "");
   const [todos, setTodos] = useState([]);
   const [keyword, setKeyword] = useState("");
   const [filter, setFilter] = useState("all");
   const [selectedTag, setSelectedTag] = useState("all");
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(Boolean(currentUser));
   const [isSaving, setIsSaving] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [quoteIndex, setQuoteIndex] = useState(0);
@@ -113,8 +170,15 @@ export default function App() {
   });
 
   useEffect(() => {
-    loadTodos();
-  }, []);
+    if (!currentUser?.id) {
+      setTodos([]);
+      setIsLoading(false);
+      setIsConnected(false);
+      return;
+    }
+
+    loadTodos(currentUser.id);
+  }, [currentUser?.id]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -125,6 +189,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!currentUser?.id) return undefined;
+
     const timer = window.setInterval(() => {
       const now = Date.now();
 
@@ -142,7 +208,7 @@ export default function App() {
               });
             }
 
-            requestJson(`/api/todo-plans/${todo.id}`, {
+            requestJson(`/api/todo-plans/${todo.id}`, currentUser.id, {
               method: "PATCH",
               body: JSON.stringify({ notified: true })
             }).catch(() => {});
@@ -156,13 +222,15 @@ export default function App() {
     }, 15000);
 
     return () => window.clearInterval(timer);
-  }, [notificationReady]);
+  }, [notificationReady, currentUser?.id]);
 
-  async function loadTodos() {
+  async function loadTodos(userId = currentUser?.id) {
+    if (!userId) return;
+
     setIsLoading(true);
 
     try {
-      const data = await requestJson(`/api/todo-plans?userId=${USER_ID}`);
+      const data = await requestJson("/api/todo-plans", userId);
       setTodos(Array.isArray(data.todos) ? data.todos : []);
       setIsConnected(true);
     } catch (error) {
@@ -235,16 +303,40 @@ export default function App() {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function handleLogin(event) {
+    event.preventDefault();
+
+    const name = normalizeUserName(loginName);
+    if (!name) return;
+
+    const nextUser = {
+      id: createUserIdFromName(name),
+      name
+    };
+
+    window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(nextUser));
+    setSelectedTag("all");
+    setKeyword("");
+    setFilter("all");
+    setCurrentUser(nextUser);
+  }
+
+  function handleLogout() {
+    window.localStorage.removeItem(USER_STORAGE_KEY);
+    setCurrentUser(null);
+    setLoginName("");
+  }
+
   async function addTodo(event) {
     event.preventDefault();
 
     const title = form.title.trim();
-    if (!title || isSaving) return;
+    if (!title || isSaving || !currentUser?.id) return;
 
     setIsSaving(true);
 
     try {
-      const data = await requestJson("/api/todo-plans", {
+      const data = await requestJson("/api/todo-plans", currentUser.id, {
         method: "POST",
         body: JSON.stringify({
           title,
@@ -274,6 +366,8 @@ export default function App() {
   }
 
   async function toggleTodo(id) {
+    if (!currentUser?.id) return;
+
     const todo = todos.find((item) => item.id === id);
     if (!todo) return;
 
@@ -285,7 +379,7 @@ export default function App() {
     );
 
     try {
-      const data = await requestJson(`/api/todo-plans/${id}`, {
+      const data = await requestJson(`/api/todo-plans/${id}`, currentUser.id, {
         method: "PATCH",
         body: JSON.stringify({ done: nextDone })
       });
@@ -304,11 +398,13 @@ export default function App() {
   }
 
   async function removeTodo(id) {
+    if (!currentUser?.id) return;
+
     const previous = todos;
     setTodos((current) => current.filter((todo) => todo.id !== id));
 
     try {
-      await requestJson(`/api/todo-plans/${id}?userId=${USER_ID}`, {
+      await requestJson(`/api/todo-plans/${id}`, currentUser.id, {
         method: "DELETE"
       });
       setIsConnected(true);
@@ -338,6 +434,29 @@ export default function App() {
         </div>
 
         <div className="hero-actions">
+          {currentUser ? (
+            <div className="account-panel">
+              <p className="notify-tip">当前用户：<strong>{currentUser.name}</strong></p>
+              <button className="account-button" type="button" onClick={handleLogout}>
+                切换用户
+              </button>
+            </div>
+          ) : (
+            <form className="account-panel" onSubmit={handleLogin}>
+              <label>
+                <span>登录用户</span>
+                <input
+                  value={loginName}
+                  onChange={(event) => setLoginName(event.target.value)}
+                  placeholder="输入你的用户名"
+                />
+              </label>
+              <button className="account-button" type="submit">
+                进入我的清单
+              </button>
+            </form>
+          )}
+
           <button
             className="notify-button"
             onClick={requestNotification}
@@ -362,26 +481,28 @@ export default function App() {
         </div>
       </section>
 
-      <section className="dashboard" aria-label="待办统计">
-        <article className="stat-card accent">
-          <span>全部事项</span>
-          <strong>{stats.total}</strong>
-        </article>
-        <article className="stat-card">
-          <span>已完成</span>
-          <strong>{stats.done}</strong>
-        </article>
-        <article className="stat-card">
-          <span>高优先级</span>
-          <strong>{stats.urgent}</strong>
-        </article>
-        <article className="stat-card">
-          <span>24 小时内到期</span>
-          <strong>{stats.upcoming}</strong>
-        </article>
-      </section>
+      {currentUser ? (
+        <>
+          <section className="dashboard" aria-label="待办统计">
+            <article className="stat-card accent">
+              <span>全部事项</span>
+              <strong>{stats.total}</strong>
+            </article>
+            <article className="stat-card">
+              <span>已完成</span>
+              <strong>{stats.done}</strong>
+            </article>
+            <article className="stat-card">
+              <span>高优先级</span>
+              <strong>{stats.urgent}</strong>
+            </article>
+            <article className="stat-card">
+              <span>24 小时内到期</span>
+              <strong>{stats.upcoming}</strong>
+            </article>
+          </section>
 
-      <section className="workspace">
+          <section className="workspace">
         <form className="panel composer" onSubmit={addTodo}>
           <div className="panel-head">
             <h2>新增待办</h2>
@@ -574,7 +695,16 @@ export default function App() {
             )}
           </div>
         </section>
-      </section>
+          </section>
+        </>
+      ) : (
+        <section className="panel signed-out-panel">
+          <div className="empty-state">
+            <h3>先选择你的用户</h3>
+            <p>不同用户名会进入不同的待办清单。</p>
+          </div>
+        </section>
+      )}
     </main>
   );
 }
